@@ -18,6 +18,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azureclients/vmssvmclient"
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
 	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	"sigs.k8s.io/cloud-provider-azure/pkg/retry"
@@ -100,23 +102,29 @@ func (ss *ScaleSet) AttachDisk(ctx context.Context, nodeName types.NodeName, dis
 			})
 	}
 
-	newVM := compute.VirtualMachineScaleSetVM{
-		VirtualMachineScaleSetVMProperties: &compute.VirtualMachineScaleSetVMProperties{
-			StorageProfile: &compute.StorageProfile{
-				DataDisks: &disks,
+	newVM := vmssvmclient.VirtualMachineScaleSetVM{
+		VirtualMachineScaleSetVM: compute.VirtualMachineScaleSetVM{
+			VirtualMachineScaleSetVMProperties: &compute.VirtualMachineScaleSetVMProperties{
+				StorageProfile: &compute.StorageProfile{
+					DataDisks: &disks,
+				},
 			},
 		},
 	}
 
 	klog.V(2).Infof("azureDisk - update: rg(%s) vm(%s) - attach disk list(%+v)", nodeResourceGroup, nodeName, diskMap)
-	future, rerr := ss.VirtualMachineScaleSetVMsClient.UpdateAsync(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, newVM, "attach_disk")
+	etag := ""
+	if vm.Etag != nil {
+		etag = *vm.Etag
+	}
+	future, rerr := ss.VirtualMachineScaleSetVMsClient.UpdateAsync(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, newVM, "attach_disk", etag)
 	if rerr != nil {
 		klog.Errorf("azureDisk - attach disk list(%+v) on rg(%s) vm(%s) failed, err: %v", diskMap, nodeResourceGroup, nodeName, rerr)
 		if rerr.HTTPStatusCode == http.StatusNotFound {
 			klog.Errorf("azureDisk - begin to filterNonExistingDisks(%v) on rg(%s) vm(%s)", diskMap, nodeResourceGroup, nodeName)
 			disks := FilterNonExistingDisks(ctx, ss.DisksClient, *newVM.VirtualMachineScaleSetVMProperties.StorageProfile.DataDisks)
 			newVM.VirtualMachineScaleSetVMProperties.StorageProfile.DataDisks = &disks
-			future, rerr = ss.VirtualMachineScaleSetVMsClient.UpdateAsync(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, newVM, "attach_disk")
+			future, rerr = ss.VirtualMachineScaleSetVMsClient.UpdateAsync(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, newVM, "attach_disk", etag)
 		}
 	}
 
@@ -137,6 +145,11 @@ func (ss *ScaleSet) WaitForUpdateResult(ctx context.Context, future *azure.Futur
 
 	result, rerr := ss.VirtualMachineScaleSetVMsClient.WaitForUpdateResult(ctx, future, nodeResourceGroup, source)
 	if rerr != nil {
+		etagMismatchError := retry.EtagMismatchError{}
+		if errors.Is(rerr.Error(), &etagMismatchError) {
+			klog.V(2).Infof("Invalidate the node cache(%s, %s) for EtagMismatchError %w", nodeResourceGroup, vmName, nodeResourceGroup, err)
+			_ = ss.DeleteCacheForNode(ctx, vmName)
+		}
 		return rerr.Error()
 	}
 
@@ -217,15 +230,17 @@ func (ss *ScaleSet) DetachDisk(ctx context.Context, nodeName types.NodeName, dis
 		}
 	}
 
-	newVM := compute.VirtualMachineScaleSetVM{
-		VirtualMachineScaleSetVMProperties: &compute.VirtualMachineScaleSetVMProperties{
-			StorageProfile: &compute.StorageProfile{
-				DataDisks: &disks,
+	newVM := vmssvmclient.VirtualMachineScaleSetVM{
+		VirtualMachineScaleSetVM: compute.VirtualMachineScaleSetVM{
+			VirtualMachineScaleSetVMProperties: &compute.VirtualMachineScaleSetVMProperties{
+				StorageProfile: &compute.StorageProfile{
+					DataDisks: &disks,
+				},
 			},
 		},
 	}
 
-	var result *compute.VirtualMachineScaleSetVM
+	var result *vmssvmclient.VirtualMachineScaleSetVM
 	var rerr *retry.Error
 
 	defer func() {
@@ -241,15 +256,19 @@ func (ss *ScaleSet) DetachDisk(ctx context.Context, nodeName types.NodeName, dis
 	}()
 
 	klog.V(2).Infof("azureDisk - update(%s): vm(%s) - detach disk list(%s)", nodeResourceGroup, nodeName, diskMap)
+	etag := ""
+	if vm.Etag != nil {
+		etag = *vm.Etag
+	}
 	result, rerr = ss.VirtualMachineScaleSetVMsClient.Update(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, newVM,
-		"detach_disk")
+		"detach_disk", etag)
 	if rerr != nil {
 		klog.Errorf("azureDisk - detach disk list(%s) on rg(%s) vm(%s) failed, err: %v", diskMap, nodeResourceGroup, nodeName, rerr)
 		if rerr.HTTPStatusCode == http.StatusNotFound {
 			klog.Errorf("azureDisk - begin to filterNonExistingDisks(%v) on rg(%s) vm(%s)", diskMap, nodeResourceGroup, nodeName)
 			disks := FilterNonExistingDisks(ctx, ss.DisksClient, *newVM.VirtualMachineScaleSetVMProperties.StorageProfile.DataDisks)
 			newVM.VirtualMachineScaleSetVMProperties.StorageProfile.DataDisks = &disks
-			result, rerr = ss.VirtualMachineScaleSetVMsClient.Update(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, newVM, "detach_disk")
+			result, rerr = ss.VirtualMachineScaleSetVMsClient.Update(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, newVM, "detach_disk", etag)
 		}
 	}
 
@@ -282,7 +301,11 @@ func (ss *ScaleSet) UpdateVMAsync(ctx context.Context, nodeName types.NodeName) 
 		return nil, err
 	}
 
-	future, rerr := ss.VirtualMachineScaleSetVMsClient.UpdateAsync(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, compute.VirtualMachineScaleSetVM{}, "update_vmss_instance")
+	etag := ""
+	if vm.Etag != nil {
+		etag = *vm.Etag
+	}
+	future, rerr := ss.VirtualMachineScaleSetVMsClient.UpdateAsync(ctx, nodeResourceGroup, vm.VMSSName, vm.InstanceID, vmssvmclient.VirtualMachineScaleSetVM{}, "update_vmss_instance", etag)
 	if rerr != nil {
 		return future, rerr.Error()
 	}

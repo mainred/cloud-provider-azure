@@ -28,6 +28,8 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azureclients/vmssclient"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azureclients/vmssvmclient"
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
 	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	utilsets "sigs.k8s.io/cloud-provider-azure/pkg/util/sets"
@@ -37,12 +39,12 @@ type VMSSVirtualMachineEntry struct {
 	ResourceGroup  string
 	VMSSName       string
 	InstanceID     string
-	VirtualMachine *compute.VirtualMachineScaleSetVM
+	VirtualMachine *vmssvmclient.VirtualMachineScaleSetVM
 	LastUpdate     time.Time
 }
 
 type VMSSEntry struct {
-	VMSS          *compute.VirtualMachineScaleSet
+	VMSS          *vmssclient.VirtualMachineScaleSet
 	ResourceGroup string
 	LastUpdate    time.Time
 }
@@ -88,6 +90,8 @@ func (ss *ScaleSet) newVMSSCache() (azcache.Resource, error) {
 
 			for i := range allScaleSets {
 				scaleSet := allScaleSets[i]
+				klog.V(4).Infof("newVMSSCache %+v", scaleSet)
+
 				if scaleSet.Name == nil || *scaleSet.Name == "" {
 					klog.Warning("failed to get the name of VMSS")
 					continue
@@ -245,6 +249,19 @@ func (ss *ScaleSet) newVMSSVirtualMachinesCache() (azcache.Resource, error) {
 	return azcache.NewTimedCache(vmssVirtualMachinesCacheTTL, getter, ss.Cloud.Config.DisableAPICallCache)
 }
 
+// DeleteCacheForVMSS deletes VMSS from VM cache.
+func (ss *ScaleSet) DeleteCacheForVMSS(ctx context.Context, vmssName string) {
+	if ss.Config.DisableAPICallCache {
+		return
+	}
+	cacheKey := getVMSSVMCacheKey(ss.ResourceGroup, vmssName)
+	ss.lockMap.LockEntry(cacheKey)
+	defer ss.lockMap.UnlockEntry(cacheKey)
+
+	ss.vmssCache.Delete(cacheKey)
+	klog.V(2).Infof("DeleteCacheForVMSS(%s, %s) successfully", ss.ResourceGroup, vmssName)
+}
+
 // DeleteCacheForNode deletes Node from VMSS VM and VM caches.
 func (ss *ScaleSet) DeleteCacheForNode(ctx context.Context, nodeName string) error {
 	if ss.Config.DisableAPICallCache {
@@ -287,7 +304,7 @@ func (ss *ScaleSet) DeleteCacheForNode(ctx context.Context, nodeName string) err
 	return nil
 }
 
-func (ss *ScaleSet) updateCache(ctx context.Context, nodeName, resourceGroupName, vmssName, instanceID string, updatedVM *compute.VirtualMachineScaleSetVM) error {
+func (ss *ScaleSet) updateCache(ctx context.Context, nodeName, resourceGroupName, vmssName, instanceID string, updatedVM *vmssvmclient.VirtualMachineScaleSetVM) error {
 	// lock the VMSS entry to ensure a consistent view of the VM map when there are concurrent updates.
 	cacheKey := getVMSSVMCacheKey(resourceGroupName, vmssName)
 	ss.lockMap.LockEntry(cacheKey)
