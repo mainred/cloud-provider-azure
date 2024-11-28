@@ -464,6 +464,8 @@ func (c *Client) PutResourcesInBatchesBase(ctx context.Context, resources map[st
 	wg := sync.WaitGroup{}
 	var responseLock, futuresLock sync.Mutex
 	for resourceID, parameters := range resources {
+		klog.V(2).Infof("mainred parameters: %+v", parameters)
+
 		rateLimiter <- struct{}{}
 		wg.Add(1)
 		go func(resourceID string, parameters interface{}) {
@@ -471,13 +473,16 @@ func (c *Client) PutResourcesInBatchesBase(ctx context.Context, resources map[st
 			defer func() { <-rateLimiter }()
 			decorators := []autorest.PrepareDecorator{}
 			if enableEtag {
-				type placeholder struct {
+				type etagPlaceholder struct {
 					Etag *string `json:"etag,omitempty"`
 				}
-				p := &placeholder{}
+				klog.V(2).Infof("mainred etagPlaceholder: %+v", parameters)
+
+				p := &etagPlaceholder{}
 				b, err := json.Marshal(parameters)
 				if err == nil {
 					err = json.Unmarshal(b, &p)
+					klog.V(2).Infof("mainred etagPlaceholder: %s, %s, %w", string(b), *p, err)
 					if err == nil && p.Etag != nil {
 						decorators = append(decorators, autorest.WithHeader("If-Match", autorest.String(*p.Etag)))
 					}
@@ -564,6 +569,7 @@ func (c *Client) PutResourceAsync(ctx context.Context, resourceID string, parame
 	)
 
 	request, err := c.PreparePutRequest(ctx, decorators...)
+	klog.V(2).Infof("mainred PutResourceAsync %s", request.Header)
 	if err != nil {
 		klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "put.prepare", resourceID, err)
 		return nil, retry.NewError(false, err)

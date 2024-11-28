@@ -43,11 +43,12 @@ func (az *Cloud) CreateOrUpdateVMSS(resourceGroupName string, VMScaleSetName str
 		klog.V(3).Infof("CreateOrUpdateVMSS: found vmss %s being deleted, skipping", VMScaleSetName)
 		return nil
 	}
-	
+
 	etag := ""
 	if parameters.Etag != nil {
 		etag = *parameters.Etag
 	}
+	klog.V(2).Infof("mainred CreateOrUpdateVMSS: etag %q", etag)
 
 	rerr = az.VirtualMachineScaleSetsClient.CreateOrUpdate(ctx, resourceGroupName, VMScaleSetName, parameters, etag)
 	klog.V(10).Infof("CreateOrUpdateVMSS: VirtualMachineScaleSetsClient.CreateOrUpdate(%s): end", VMScaleSetName)

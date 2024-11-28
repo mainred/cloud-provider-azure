@@ -19,6 +19,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -90,7 +91,7 @@ func (ss *ScaleSet) newVMSSCache() (azcache.Resource, error) {
 
 			for i := range allScaleSets {
 				scaleSet := allScaleSets[i]
-				klog.V(4).Infof("newVMSSCache %+v", scaleSet)
+				klog.V(4).Infof("mainred newVMSSCache %+v", scaleSet)
 
 				if scaleSet.Name == nil || *scaleSet.Name == "" {
 					klog.Warning("failed to get the name of VMSS")
@@ -151,6 +152,7 @@ func (ss *ScaleSet) newVMSSVirtualMachinesCache() (azcache.Resource, error) {
 	getter := func(_ context.Context, cacheKey string) (interface{}, error) {
 		localCache := &sync.Map{} // [nodeName]*VMSSVirtualMachineEntry
 		oldCache := make(map[string]*VMSSVirtualMachineEntry)
+		klog.V(2).Infof("mainred newVMSSVirtualMachinesCache stack %s", string(debug.Stack()))
 
 		if !ss.Cloud.Config.DisableAPICallCache {
 			entry, exists, err := ss.vmssVMCache.GetStore().GetByKey(cacheKey)
@@ -188,6 +190,7 @@ func (ss *ScaleSet) newVMSSVirtualMachinesCache() (azcache.Resource, error) {
 				klog.Warningf("failed to get computerName for vmssVM (%q)", vmssName)
 				continue
 			}
+			klog.V(2).Infof("mainred newVMSSVirtualMachinesCache %+v", vm.Etag)
 
 			computerName := strings.ToLower(*vm.OsProfile.ComputerName)
 			if vm.NetworkProfile == nil || vm.NetworkProfile.NetworkInterfaces == nil {
@@ -249,17 +252,33 @@ func (ss *ScaleSet) newVMSSVirtualMachinesCache() (azcache.Resource, error) {
 	return azcache.NewTimedCache(vmssVirtualMachinesCacheTTL, getter, ss.Cloud.Config.DisableAPICallCache)
 }
 
-// DeleteCacheForVMSS deletes VMSS from VM cache.
-func (ss *ScaleSet) DeleteCacheForVMSS(ctx context.Context, vmssName string) {
+// DeleteCacheForVMSS deletes VMSS from VMSS cache.
+func (ss *ScaleSet) DeleteCacheForVMSS(ctx context.Context, vmssName string) error {
 	if ss.Config.DisableAPICallCache {
-		return
+		return nil
 	}
-	cacheKey := getVMSSVMCacheKey(ss.ResourceGroup, vmssName)
-	ss.lockMap.LockEntry(cacheKey)
-	defer ss.lockMap.UnlockEntry(cacheKey)
+	ss.lockMap.LockEntry(consts.VMSSKey)
+	defer ss.lockMap.UnlockEntry(consts.VMSSKey)
 
-	ss.vmssCache.Delete(cacheKey)
+	entry, err := ss.vmssCache.Get(ctx, consts.VMSSKey, azcache.CacheReadTypeUnsafe)
+	if err != nil {
+		klog.Errorf("DeleteCacheForVMSS(%s) failed to get vmss from cache for %v", vmssName, err)
+		return err
+	}
+	if entry == nil {
+		return nil
+	}
+	vmssMap, ok := entry.(*sync.Map)
+	if !ok {
+		klog.V(2).Infof("DeleteCacheForVMSS(%s, %s) cache entry is sync.Map, deleting all vmss caches", ss.ResourceGroup, vmssName)
+		_ = ss.vmssCache.Delete(consts.VMSSKey)
+		return nil
+	}
+
+	vmssMap.Delete(vmssName)
+	ss.vmssCache.Update(consts.VMSSKey, vmssMap)
 	klog.V(2).Infof("DeleteCacheForVMSS(%s, %s) successfully", ss.ResourceGroup, vmssName)
+	return nil
 }
 
 // DeleteCacheForNode deletes Node from VMSS VM and VM caches.

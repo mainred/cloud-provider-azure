@@ -18,6 +18,7 @@ package vmssvmclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -225,6 +226,11 @@ func (c *Client) listVMSSVM(ctx context.Context, resourceGroupName string, virtu
 			klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vmssvm.list.next", resourceID, err)
 			return result, retry.GetError(page.Response().Response.Response, err)
 		}
+	}
+
+	for _, vm := range result {
+		klog.V(2).Infof("mainred listVMSSVM %+v", vm.Etag)
+
 	}
 
 	return result, nil
@@ -516,6 +522,10 @@ func (c *Client) updateVMSSVMs(ctx context.Context, resourceGroupName string, VM
 			instanceID,
 		)
 		resources[resourceID] = parameter
+		klog.V(2).Infof("mainred updateVMSSVMs %s", *parameter.Etag)
+		b, _ := json.Marshal(parameter)
+		klog.V(2).Infof("mainred updateVMSSVMs %+v", string(b))
+
 	}
 
 	responses := c.armClient.PutResourcesInBatchesWithEtag(ctx, resources, batchSize)

@@ -767,7 +767,7 @@ func (fs *FlexScaleSet) ensureBackendPoolDeletedFromVmssFlex(ctx context.Context
 		}
 		vmssFlexes := cached.(*sync.Map)
 		vmssFlexes.Range(func(_, value interface{}) bool {
-			vmssFlex := value.(*compute.VirtualMachineScaleSet)
+			vmssFlex := value.(*vmssclient.VirtualMachineScaleSet)
 			vmssNamesMap[ptr.Deref(vmssFlex.Name, "")] = true
 			return true
 		})

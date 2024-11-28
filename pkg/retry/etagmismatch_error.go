@@ -1,8 +1,12 @@
 package retry
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -11,6 +15,8 @@ const (
 	// Etag provided in if-match header {0} does not match etag {1} of resource.
 	//   where {0} and {1} are the etags provided in the request and the resource respectively.
 	EtagMismatchPattern = `Etag provided in if-match header ([^\s]+) does not match etag ([^\s]+) of resource`
+
+	EtagMismatchErrorTag = "EtagMismatchError"
 )
 
 type EtagMismatchError struct {
@@ -35,7 +41,7 @@ func NewEtagMismatchError(httpStatusCode int, respBody string) *EtagMismatchErro
 }
 
 func (e *EtagMismatchError) Error() string {
-	return ""
+	return fmt.Sprintf("%s: etag %s does not match etag %s of resource", EtagMismatchErrorTag, e.currentEtag, e.latestEtag)
 }
 
 func (e *EtagMismatchError) CurrentEtag() string {
@@ -44,6 +50,10 @@ func (e *EtagMismatchError) CurrentEtag() string {
 
 func (e *EtagMismatchError) LatestEtag() string {
 	return e.latestEtag
+}
+
+func (e *EtagMismatchError) Is(target error) bool {
+	return strings.Contains(target.Error(), EtagMismatchErrorTag)
 }
 
 // isPreconditionFailedEtagMismatch returns true the if the request failed for Etag mismatch
@@ -55,20 +65,21 @@ func IsPreconditionFailedEtagMismatch(httpStatusCode int, respBody string) bool 
 
 	_, _, match := getMatchedLatestAndCurrentEtags(respBody)
 	return match
-
 }
 
-func getMatchedLatestAndCurrentEtags(respBody string) (currentEtag string, latestEtag string, match bool) {
+func getMatchedLatestAndCurrentEtags(respBody string) (string, string, bool) {
 
+	var currentEtag, latestEtag string
 	re := regexp.MustCompile(EtagMismatchPattern)
 	matches := re.FindStringSubmatch(respBody)
+	klog.V(3).Infof("mainred getMatchedLatestAndCurrentEtags: %d", len(matches))
+
 	if len(matches) != 3 {
-		return
+		return currentEtag, latestEtag, false
 	}
 
 	currentEtag = matches[1]
 	latestEtag = matches[2]
-	match = true
 
-	return
+	return currentEtag, latestEtag, true
 }

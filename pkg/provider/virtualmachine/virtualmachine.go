@@ -118,6 +118,7 @@ func FromVirtualMachineScaleSetVM(vm *vmssvmclient.VirtualMachineScaleSetVM, opt
 		Zones:     stringSlice(vm.Zones),
 		Plan:      vm.Plan,
 		Resources: vm.Resources,
+		Etag:      vm.Etag,
 
 		SKU:                                vm.Sku,
 		InstanceID:                         ptr.Deref(vm.InstanceID, ""),

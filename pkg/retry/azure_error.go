@@ -194,6 +194,7 @@ func getRawError(resp *http.Response, err error) error {
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	klog.V(3).Infof("mainred getRawError: %s", string(respBody))
 	if len(respBody) == 0 {
 		return fmt.Errorf("HTTP status code (%d)", resp.StatusCode)
 	}

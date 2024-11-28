@@ -145,8 +145,7 @@ func (ss *ScaleSet) WaitForUpdateResult(ctx context.Context, future *azure.Futur
 
 	result, rerr := ss.VirtualMachineScaleSetVMsClient.WaitForUpdateResult(ctx, future, nodeResourceGroup, source)
 	if rerr != nil {
-		etagMismatchError := retry.EtagMismatchError{}
-		if errors.Is(rerr.Error(), &etagMismatchError) {
+		if errors.Is(rerr.Error(), &retry.EtagMismatchError{}) {
 			klog.V(2).Infof("Invalidate the node cache(%s, %s) for EtagMismatchError %w", nodeResourceGroup, vmName, nodeResourceGroup, err)
 			_ = ss.DeleteCacheForNode(ctx, vmName)
 		}

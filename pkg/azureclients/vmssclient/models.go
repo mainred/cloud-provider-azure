@@ -72,3 +72,44 @@ func (vmss *VirtualMachineScaleSet) UnmarshalJSON(data []byte) error {
 	(vmss).VirtualMachineScaleSet = nestedVirtualMachineScaleSet.VirtualMachineScaleSet
 	return nil
 }
+
+// MarshalJSON is the custom marshaler for VirtualMachineScaleSet.
+func (vmss VirtualMachineScaleSet) MarshalJSON() ([]byte, error) {
+	var err error
+	var nestedVirtualMachineScaleSetJson, etagJson []byte
+	if nestedVirtualMachineScaleSetJson, err = vmss.VirtualMachineScaleSet.MarshalJSON(); err != nil {
+		return nil, err
+	}
+
+	if vmss.Etag != nil {
+		if etagJson, err = json.Marshal(map[string]interface{}{
+			"etag": vmss.Etag,
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	// empty struct can be Unmarshaled to "{}"
+	nestedVirtualMachineScaleSetJsonEmpty := true
+	if string(nestedVirtualMachineScaleSetJson) != "{}" {
+		nestedVirtualMachineScaleSetJsonEmpty = false
+	}
+	etagJsonEmpty := true
+	if len(etagJson) != 0 {
+		etagJsonEmpty = false
+	}
+
+	// when both parts not empty, join the two parts with a comma but remove the open brace of nestedVirtualMachineScaleSetVMJson and the close brace of the etagJson
+	// {"location": "eastus"} + {"etag": "\"120\""} will be merged into {"location": "eastus", "etag": "\"120\""}
+	if !nestedVirtualMachineScaleSetJsonEmpty && !etagJsonEmpty {
+		etagJson[0] = ','
+		return append(nestedVirtualMachineScaleSetJson[:len(nestedVirtualMachineScaleSetJson)-1], etagJson...), nil
+	}
+	if !nestedVirtualMachineScaleSetJsonEmpty {
+		return nestedVirtualMachineScaleSetJson, nil
+	}
+	if !etagJsonEmpty {
+		return etagJson, nil
+	}
+	return []byte("{}"), nil
+}
