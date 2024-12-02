@@ -26,7 +26,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2022-07-01/network"
@@ -44,6 +43,7 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	"sigs.k8s.io/cloud-provider-azure/pkg/metrics"
 	"sigs.k8s.io/cloud-provider-azure/pkg/provider/virtualmachine"
+	"sigs.k8s.io/cloud-provider-azure/pkg/retry"
 	vmutil "sigs.k8s.io/cloud-provider-azure/pkg/util/vm"
 )
 
@@ -110,6 +110,7 @@ type ScaleSet struct {
 }
 
 // RefreshCaches invalidates and renew all related caches.
+// caches are lazy loaded when getting the resources from the cache.
 func (ss *ScaleSet) RefreshCaches() error {
 	logger := klog.Background().WithName("ss.RefreshCaches")
 
@@ -237,7 +238,6 @@ func (ss *ScaleSet) getVmssVMByNodeIdentity(ctx context.Context, node *nodeIdent
 	}
 
 	vm, found, err := getter(ctx, crt)
-	klog.V(2).Infof("mainred getVmssVMByNodeIdentity %+v", vm.Etag)
 
 	if err != nil {
 		return nil, err
@@ -262,6 +262,8 @@ func (ss *ScaleSet) getVmssVMByNodeIdentity(ctx context.Context, node *nodeIdent
 	}
 
 	if found && vm != nil {
+		klog.V(2).Infof("mainred getVmssVMByNodeIdentity %+v", vm.Etag)
+
 		return vm, nil
 	}
 
@@ -1338,10 +1340,12 @@ func (ss *ScaleSet) ensureVMSSInPool(ctx context.Context, _ *v1.Service, nodes [
 
 		klog.V(2).Infof("ensureVMSSInPool begins to update vmss(%s) with new backendPoolID %s", vmssName, backendPoolID)
 		rerr := ss.CreateOrUpdateVMSS(ss.ResourceGroup, vmssName, newVMSS)
-		defer func() {
-			// Invalidate the cache since the VMSS would be updated
-			_ = ss.DeleteCacheForVMSS(ctx, vmssName)
-		}()
+		// VMSS cache must be refreshed when etagmismatch error happens.
+		// TODO(mainred): we need to update the cache if update is successful
+		if rerr != nil && errors.Is(rerr.Error(), &retry.EtagMismatchError{}) {
+			klog.V(3).Infof("EnsureBackendPoolDeletedFromVMSets invalidate the vmss cache for EtagMismatchError")
+			_ = ss.vmssCache.Delete(consts.VMSSKey)
+		}
 		if rerr != nil {
 			klog.Errorf("ensureVMSSInPool CreateOrUpdateVMSS(%s) with new backendPoolID %s, err: %v", vmssName, backendPoolID, rerr.Error())
 			return rerr.Error()
@@ -1399,7 +1403,7 @@ func (ss *ScaleSet) ensureHostsInPool(ctx context.Context, service *v1.Service, 
 
 	hostUpdates := make([]func() error, 0, len(nodes))
 	nodeUpdates := make(map[vmssMetaInfo]map[string]vmssvmclient.VirtualMachineScaleSetVM)
-	errors := make([]error, 0)
+	errs := make([]error, 0)
 	for _, node := range nodes {
 		localNodeName := node.Name
 
@@ -1421,7 +1425,7 @@ func (ss *ScaleSet) ensureHostsInPool(ctx context.Context, service *v1.Service, 
 		nodeResourceGroup, nodeVMSS, nodeInstanceID, nodeVMSSVM, err := ss.EnsureHostInPool(ctx, service, types.NodeName(localNodeName), backendPoolID, vmSetNameOfLB)
 		if err != nil {
 			klog.Errorf("EnsureHostInPool(%s): backendPoolID(%s) - failed to ensure host in pool: %q", getServiceName(service), backendPoolID, err)
-			errors = append(errors, err)
+			errs = append(errs, err)
 			continue
 		}
 
@@ -1480,14 +1484,20 @@ func (ss *ScaleSet) ensureHostsInPool(ctx context.Context, service *v1.Service, 
 			return nil
 		})
 	}
-	errs := utilerrors.AggregateGoroutines(hostUpdates...)
-	if errs != nil {
-		return utilerrors.Flatten(errs)
+	updateErrors := utilerrors.AggregateGoroutines(hostUpdates...)
+	if updateErrors != nil {
+		// TODO(mainred): Update vm cache from response when a sucessful update is done instead of always invalidating the cache for a refresh.
+		// Invalidates the vm cache only when an etag mismatch error happens to reduce the cache triggered API call.
+		aggUpdateErrors := utilerrors.Flatten(updateErrors)
+		if errors.Is(aggUpdateErrors, &retry.EtagMismatchError{}) {
+			klog.V(3).Info("EnsureHostInPool UpdateVMs failed for EtagMismatchError")
+		}
+		return aggUpdateErrors
 	}
 
 	// Fail if there are other errors.
-	if len(errors) > 0 {
-		return utilerrors.Flatten(utilerrors.NewAggregate(errors))
+	if len(errs) > 0 {
+		return utilerrors.Flatten(utilerrors.NewAggregate(errs))
 	}
 
 	// Ensure the backendPoolID is also added on VMSS itself.
@@ -1708,6 +1718,8 @@ func getScaleSetAndResourceGroupNameByIPConfigurationID(ipConfigurationID string
 }
 
 func (ss *ScaleSet) ensureBackendPoolDeletedFromVMSS(ctx context.Context, backendPoolIDs []string, vmSetName string) error {
+	klog.V(2).Infof("mainred ensureBackendPoolDeletedFromVMSS start")
+
 	if !ss.useStandardLoadBalancer() {
 		found := false
 
@@ -1773,7 +1785,6 @@ func (ss *ScaleSet) ensureBackendPoolDeletedFromVmssUniform(ctx context.Context,
 			klog.Errorf("ensureBackendPoolDeletedFromVMSS: failed to get vmss uniform from cache: %v", err)
 			return err
 		}
-
 		vmssUniformMap := cachedUniform.(*sync.Map)
 		var errorList []error
 		walk := func(_, value interface{}) bool {
@@ -1965,10 +1976,6 @@ func (ss *ScaleSet) ensureBackendPoolDeleted(ctx context.Context, service *v1.Se
 				return err
 			}
 
-			klog.V(2).Infof("mainred sleep")
-
-			time.Sleep(60 * time.Second)
-
 			klog.V(2).InfoS("Begin to update VMs for VMSS with new backendPoolID", logFields...)
 			//NOTE(mainred): We don't have to invalidate the cache in case of ETagMismatch error, since the cache is already invalidated anyway
 			// in the last nodes loop in defer function.
@@ -1982,9 +1989,17 @@ func (ss *ScaleSet) ensureBackendPoolDeleted(ctx context.Context, service *v1.Se
 			return nil
 		})
 	}
-	errs := utilerrors.AggregateGoroutines(hostUpdates...)
-	if errs != nil {
-		return updatedVM.Load(), utilerrors.Flatten(errs)
+
+	updateErrors := utilerrors.AggregateGoroutines(hostUpdates...)
+	if updateErrors != nil {
+		// TODO(mainred): Update vm cache from response when a sucessful update is done instead of always invalidating the cache for a refresh.
+		// Invalidates the vm cache only when an etag mismatch error happens to reduce the cache triggered API call.
+		aggUpdateErrors := utilerrors.Flatten(updateErrors)
+		if errors.Is(aggUpdateErrors, &retry.EtagMismatchError{}) {
+			klog.V(3).Info("EnsureHostInPool UpdateVMs failed for EtagMismatchError")
+		}
+		return updatedVM.Load(), aggUpdateErrors
+
 	}
 
 	// Fail if there are other errors.
@@ -2037,6 +2052,7 @@ func (ss *ScaleSet) EnsureBackendPoolDeleted(ctx context.Context, service *v1.Se
 
 	// make sure all vmss including uniform and flex are decoupled from
 	// the lb backend pool even if there is no ipConfigs in the backend pool.
+	klog.V(2).Infof("mainred EnsureBackendPoolDeleted deleteFromVMSet %t", deleteFromVMSet)
 	if deleteFromVMSet {
 		err := ss.ensureBackendPoolDeletedFromVMSS(ctx, backendPoolIDs, vmSetName)
 		if err != nil {
@@ -2247,10 +2263,13 @@ func (ss *ScaleSet) EnsureBackendPoolDeletedFromVMSets(ctx context.Context, vmss
 			klog.V(2).Infof("EnsureBackendPoolDeletedFromVMSets begins to update vmss(%s) with backendPoolIDs %q", vmssName, backendPoolIDs)
 			rerr := ss.CreateOrUpdateVMSS(ss.ResourceGroup, vmssName, newVMSS)
 
-			defer func() {
-				// Invalidate the cache since the VMSS would be updated
-				_ = ss.DeleteCacheForVMSS(ctx, vmssName)
-			}()
+			// VMSS cache must be refreshed when etagmismatch error happens.
+			// TODO(mainred): we need to update the cache from the update/patch response
+			// if update is successful
+			if rerr != nil && errors.Is(rerr.Error(), &retry.EtagMismatchError{}) {
+				klog.V(3).Infof("EnsureBackendPoolDeletedFromVMSets invalidate the vmss cache for EtagMismatchError")
+				_ = ss.vmssCache.Delete(consts.VMSSKey)
+			}
 
 			if rerr != nil {
 				klog.Errorf("EnsureBackendPoolDeletedFromVMSets CreateOrUpdateVMSS(%s) with new backendPoolIDs %q, err: %v", vmssName, backendPoolIDs, rerr)

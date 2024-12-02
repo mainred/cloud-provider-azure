@@ -18,6 +18,7 @@ package provider
 
 import (
 	"strings"
+	"time"
 
 	"k8s.io/klog/v2"
 
@@ -31,6 +32,15 @@ func (az *Cloud) CreateOrUpdateVMSS(resourceGroupName string, VMScaleSetName str
 	ctx, cancel := getContextWithCancel()
 	defer cancel()
 
+	klog.V(2).Infof("mainred CreateOrUpdateVMSS begins sleep")
+	etag := ""
+	if parameters.Etag != nil {
+		etag = *parameters.Etag
+	}
+	klog.V(2).Infof("mainred CreateOrUpdateVMSS: etag %q", etag)
+
+	time.Sleep(1 * time.Minute)
+
 	// When vmss is being deleted, CreateOrUpdate API would report "the vmss is being deleted" error.
 	// Since it is being deleted, we shouldn't send more CreateOrUpdate requests for it.
 	klog.V(3).Infof("CreateOrUpdateVMSS: verify the status of the vmss being created or updated")
@@ -43,12 +53,6 @@ func (az *Cloud) CreateOrUpdateVMSS(resourceGroupName string, VMScaleSetName str
 		klog.V(3).Infof("CreateOrUpdateVMSS: found vmss %s being deleted, skipping", VMScaleSetName)
 		return nil
 	}
-
-	etag := ""
-	if parameters.Etag != nil {
-		etag = *parameters.Etag
-	}
-	klog.V(2).Infof("mainred CreateOrUpdateVMSS: etag %q", etag)
 
 	rerr = az.VirtualMachineScaleSetsClient.CreateOrUpdate(ctx, resourceGroupName, VMScaleSetName, parameters, etag)
 	klog.V(10).Infof("CreateOrUpdateVMSS: VirtualMachineScaleSetsClient.CreateOrUpdate(%s): end", VMScaleSetName)

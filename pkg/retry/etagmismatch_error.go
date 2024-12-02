@@ -40,6 +40,8 @@ func NewEtagMismatchError(httpStatusCode int, respBody string) *EtagMismatchErro
 	}
 }
 
+// TODO(mainred): should we include the vmss ID to force align with GetVMSSMetadataByRawError to have a internal retry?
+// https://github.com/kubernetes-sigs/cloud-provider-azure/blob/793451a4f140baa13c958bb958c9eb9cdeb6738c/pkg/provider/azure_loadbalancer.go#L678
 func (e *EtagMismatchError) Error() string {
 	return fmt.Sprintf("%s: etag %s does not match etag %s of resource", EtagMismatchErrorTag, e.currentEtag, e.latestEtag)
 }

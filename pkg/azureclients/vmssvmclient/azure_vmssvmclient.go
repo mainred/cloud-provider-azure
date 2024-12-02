@@ -495,6 +495,12 @@ func (c *Client) UpdateVMs(ctx context.Context, resourceGroupName string, VMScal
 		return rerr
 	}
 
+	klog.V(2).InfoS("mainred UpdateVMs to sleep")
+	for _, instance := range instances {
+		klog.V(2).Infof("mainred vm etag %s", *instance.Etag)
+	}
+	time.Sleep(1 * time.Minute)
+
 	rerr := c.updateVMSSVMs(ctx, resourceGroupName, VMScaleSetName, instances, batchSize)
 	mc.Observe(rerr)
 	if rerr != nil {
