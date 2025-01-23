@@ -19,6 +19,7 @@ package virtualmachinescalesetvmclient
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -59,6 +60,8 @@ type PutResourcesResponse struct {
 	Error error
 }
 
+var shouldEtagMismatch = true
+
 // UpdateVMsInBatch send the async API calls in parallel, determined by the batch size, and wait for the calls to finish.
 func UpdateVMsInBatch(ctx context.Context, client *Client, resourceGroupName string, VMScaleSetName string, instances map[string]armcompute.VirtualMachineScaleSetVM, batchSize int) error {
 	if len(instances) == 0 {
@@ -90,6 +93,14 @@ func UpdateVMsInBatch(ctx context.Context, client *Client, resourceGroupName str
 		go func(resourceID string, vm armcompute.VirtualMachineScaleSetVM) {
 			defer wg.Done()
 			defer func() { <-rateLimiter }()
+			if shouldEtagMismatch && VMScaleSetName == "aks-bs-26947272-vmss" {
+				i, _ := strconv.Atoi(instanceID)
+				etag := "1"
+				if i%2 == 0 {
+					vm.Etag = &etag
+				}
+			}
+
 			poller, err := UpdateAsync(ctx, client, resourceGroupName, VMScaleSetName, instanceID, vm)
 			if err != nil {
 				responseLock.Lock()
@@ -109,7 +120,13 @@ func UpdateVMsInBatch(ctx context.Context, client *Client, resourceGroupName str
 
 	klog.V(4).Infof("begin to wait async")
 	waitAsync(ctx, pollers, responses)
-
+	if VMScaleSetName == "aks-bs-26947272-vmss" {
+		if shouldEtagMismatch {
+			shouldEtagMismatch = false
+		} else {
+			shouldEtagMismatch = true
+		}
+	}
 	for _, response := range responses {
 		if response.Error != nil {
 			return response.Error
