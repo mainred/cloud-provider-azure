@@ -1337,7 +1337,7 @@ func (ss *ScaleSet) ensureVMSSInPool(ctx context.Context, _ *v1.Service, nodes [
 		klog.V(2).Infof("ensureVMSSInPool begins to update vmss(%s) with new backendPoolID %s", vmssName, backendPoolID)
 		rerr := ss.CreateOrUpdateVMSS(ss.ResourceGroup, vmssName, newVMSS)
 		if rerr != nil {
-			klog.Errorf("ensureVMSSInPool CreateOrUpdateVMSS(%s) with new backendPoolID %s, err: %v", vmssName, backendPoolID, err)
+			klog.Errorf("ensureVMSSInPool CreateOrUpdateVMSS(%s) with new backendPoolID %s, err: %v", vmssName, backendPoolID, rerr)
 			return rerr
 		}
 	}
@@ -1474,6 +1474,7 @@ func (ss *ScaleSet) ensureHostsInPool(ctx context.Context, service *v1.Service, 
 			for instanceID, vm := range update {
 				instanceID := instanceID
 				vm := vm
+
 				grp.Go(func() error {
 					_, rerr := ss.ComputeClientFactory.GetVirtualMachineScaleSetVMClient().Update(ctx, meta.resourceGroup, meta.vmssName, instanceID, vm)
 					return rerr
@@ -1636,6 +1637,7 @@ func (ss *ScaleSet) ensureBackendPoolDeletedFromNode(ctx context.Context, nodeNa
 				NetworkInterfaceConfigurations: networkInterfaceConfigurations,
 			},
 		},
+		Etag: vm.Etag,
 	}
 
 	// Get the node resource group.
